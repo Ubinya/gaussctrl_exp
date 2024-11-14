@@ -17,3 +17,5 @@ render/
 
 requirements-old.txt
 environment.yml
+
+.idea/

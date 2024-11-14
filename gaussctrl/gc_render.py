@@ -735,7 +735,7 @@ class DatasetRender(BaseRender):
     """Split to render."""
     rendered_output_names: Optional[List[str]] = field(default_factory=lambda: None)
     """Name of the renderer outputs to use. rgb, depth, depth_npy etc. By default all outputs are rendered."""
-    save_depth_npy: bool = False
+    save_depth_npy: bool = True
 
     def main(self):
         config: TrainerConfig

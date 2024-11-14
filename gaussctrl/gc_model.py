@@ -105,6 +105,7 @@ class GaussCtrlModel(SplatfactoModel):
         viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
         viewmat[:3, :3] = R_inv
         viewmat[:3, 3:4] = T_inv
+        #print(f'viewjmat:{viewmat}')
         # calculate the FOV of the camera given fx and fy, width and height
         cx = camera.cx.item()
         cy = camera.cy.item()
@@ -113,6 +114,7 @@ class GaussCtrlModel(SplatfactoModel):
         W, H = int(camera.width.item()), int(camera.height.item())
         self.last_size = (H, W)
         projmat = projection_matrix(0.001, 1000, fovx, fovy, device=self.device)
+        #print(f'projmat:{projmat}')
         BLOCK_X, BLOCK_Y = 16, 16
         tile_bounds = (
             int((W + BLOCK_X - 1) // BLOCK_X),
@@ -203,7 +205,8 @@ class GaussCtrlModel(SplatfactoModel):
             depth_im[alpha > 0] = depth_im[alpha > 0] / alpha[alpha > 0]
             depth_im[alpha == 0] = 1000
 
-        return {"rgb": rgb, "depth": depth_im, "accumulation": alpha}  # type: ignore
+        return {"rgb": rgb, "depth": depth_im, "accumulation": alpha,
+        "mat_view":viewmat, "mat_proj":projmat}  # type: ignore
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:
