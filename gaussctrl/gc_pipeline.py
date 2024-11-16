@@ -43,6 +43,8 @@ from nerfstudio.utils import colormaps
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UNet2DConditionModel
 from diffusers.schedulers import DDIMScheduler, DDIMInverseScheduler
 
+from gaussctrl.ad_render import MultiVeiwNoiseRenderer
+
 CONSOLE = Console(width=120)
 
 @dataclass
@@ -55,10 +57,8 @@ class GaussCtrlPipelineConfig(VanillaPipelineConfig):
     """specifies the datamanager config"""
     render_rate: int = 500
     """how many gauss steps for gauss training"""
-    edit_prompt: str = ""
+    prompt: str = ""
     """Positive Prompt"""
-    reverse_prompt: str = "" 
-    """DDIM Inversion Prompt"""
     langsam_obj: str = ""
     """The object to be edited"""
     guidance_scale: float = 5
@@ -91,8 +91,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.test_mode = test_mode
         self.langsam = LangSAM()
         
-        self.edit_prompt = self.config.edit_prompt
-        self.reverse_prompt = self.config.reverse_prompt
+        self.prompt = self.config.prompt
         self.pipe_device = 'cuda:0'
         self.ddim_scheduler = DDIMScheduler.from_pretrained(self.config.diffusion_ckpt, subfolder="scheduler")
         self.ddim_inverser = DDIMInverseScheduler.from_pretrained(self.config.diffusion_ckpt, subfolder="scheduler")
@@ -102,8 +101,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.pipe.to(self.pipe_device)
 
         added_prompt = 'best quality, extremely detailed'
-        self.positive_prompt = self.edit_prompt + ', ' + added_prompt
-        self.positive_reverse_prompt = self.reverse_prompt + ', ' + added_prompt
+        self.positive_prompt = self.prompt + ', ' + added_prompt
         self.negative_prompts = 'longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality'
         
         view_num = len(self.datamanager.cameras) 
@@ -119,6 +117,8 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.eta = 0.0
         self.chunk_size = self.config.chunk_size
 
+        self.noise_renderer = MultiVeiwNoiseRenderer(width=512,height=512)
+
     def render_reverse(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
         for cam_idx in range(len(self.datamanager.cameras)):
@@ -131,6 +131,13 @@ class GaussCtrlPipeline(VanillaPipeline):
 
             rendered_rgb = rendered_image['rgb'].to(torch.float16) # [512 512 3] 0-1
             rendered_depth = rendered_image['depth'].to(torch.float16) # [512 512 1]
+            
+            self.noise_renderer.setup_noise("gaussctrl/noise_npy/noise1113_1944.npy")
+            rendered_depth32 = rendered_image['depth'].to(torch.float32).cpu().numpy() # [512 512 1]
+            mat_view = rendered_image['mat_view'].to(torch.float32).cpu().numpy()
+            mat_proj = rendered_image['mat_proj'].to(torch.float32).cpu().numpy()
+            multiviewcosis_mask = self.noise_renderer.render_noise_SS(rendered_depth32,mat_view,mat_proj)
+            self.noise_renderer.save_result_mask(multiviewcosis_mask,"gaussctrl/noise_res_img")
 
             # reverse the images to noises
             self.pipe.unet.set_attn_processor(processor=AttnProcessor())
@@ -139,7 +146,7 @@ class GaussCtrlPipeline(VanillaPipeline):
             disparity = self.depth2disparity_torch(rendered_depth[:,:,0][None]) 
             
             self.pipe.scheduler = self.ddim_inverser
-            latent, _ = self.pipe(prompt=self.positive_reverse_prompt, #  placeholder here, since cfg=0
+            latent, _ = self.pipe(prompt=self.positive_prompt, #  placeholder here, since cfg=0
                                 num_inference_steps=self.num_inference_steps, 
                                 latents=init_latent, 
                                 image=disparity, return_dict=False, guidance_scale=0, output_type='latent')
@@ -166,7 +173,7 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.pipe.controlnet.set_attn_processor(
                         processor=utils.CrossViewAttnProcessor(self_attn_coeff=0,
                         unet_chunk_size=2)) 
-        CONSOLE.print("Done Resetting Attention Processor", style="bold blue")
+        CONSOLE.print("Done Reset Attention Processor", style="bold blue")
         
         print("#############################")
         CONSOLE.print("Start Editing: ", style="bold yellow")
