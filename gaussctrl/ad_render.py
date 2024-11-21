@@ -46,9 +46,10 @@ def compile_program(vertex_shader, fragment_shader):
 
     return program
 
-def projection_matrix_ogl(fovx, fovy,znear=0.001, zfar=1000.0):
+def projection_matrix_splatfacto(fovx, fovy,znear=0.001, zfar=1000.0):
     """
-    OpenGL-style perspective projection matrix: ndc range [-1,1]
+    OpenGL-style perspective projection matrix
+    but input range [n,f] ndc range [0,1]
     """
     t = znear * math.tan(0.5 * fovy)
     b = -t
@@ -64,6 +65,26 @@ def projection_matrix_ogl(fovx, fovy,znear=0.001, zfar=1000.0):
             [0.0, 0.0, 1.0, 0.0],
         ], dtype=np.float32
     )
+
+def projection_matrix_ogl(fovx, fovy,znear=0.001, zfar=1000.0):
+    """
+    -n to -1, -f to 1
+    """
+    t = znear * math.tan(0.5 * fovy)
+    b = -t
+    r = znear * math.tan(0.5 * fovx)
+    l = -r
+    n = znear
+    f = zfar
+    return np.array(
+        [
+            [2 * n / (r - l), 0.0, (r + l) / (r - l), 0.0],
+            [0.0, 2 * n / (t - b), (t + b) / (t - b), 0.0],
+            [0.0, 0.0, -(f + n) / (f - n), -2.0 * f * n / (f - n)],
+            [0.0, 0.0, -1.0, 0.0],
+        ], dtype=np.float32
+    )
+
 
 def projection_matrix_dx(x,y,
                         near=0.1,far=100.0,
@@ -88,6 +109,7 @@ def depth_np2texture(depth_np, print_range=False):
         print(f'range of input depth npy: {np.min(depth_np)}, {np.max(depth_np)}')
     depth_np=np.clip(depth_np, 0.0, 1000.0) # clamp exr depth from 0.0 to 1000.0
     depth_np=np.flipud(depth_np)
+    depth_np=np.fliplr(depth_np)
     #depth_np[depth_np==1000.0]=3.0
     #print(f"max:{np.max(depth_np)},min:{np.min(depth_np)}")
 
@@ -129,6 +151,45 @@ def inv_mat(mat):
     else:
         return np.linalg.inv(mat)
 
+def extract_camera_parameters(c2w_matrix):
+    # Ensure the input is a numpy array
+    c2w_matrix = np.array(c2w_matrix)
+    # Extract the translation vector (camera position)
+    cam_pos = c2w_matrix[:3, 3]
+    # Extract the rotation matrix (R)
+    R = c2w_matrix[:3, :3]
+    # Extract the forward vector (negative of the third column of R)
+    forward = -R[:, 2]
+    # Extract the up vector (the second column of R)
+    up = R[:, 1]
+    return cam_pos, up, forward
+
+def compute_view_matrix_ogl(cam_pos, up, forward):
+    # Normalize the forward and up vectors
+    forward = forward / np.linalg.norm(forward)
+    up = up / np.linalg.norm(up)
+
+    # Calculate the right vector
+    right = np.cross(up, forward)
+    right = right / np.linalg.norm(right)
+
+    # Recalculate the up vector
+    up = np.cross(forward, right)
+
+    # Create the view matrix
+    view_matrix = np.zeros((4, 4))
+    view_matrix[0, :3] = right
+    view_matrix[1, :3] = up
+    view_matrix[2, :3] = -forward
+    view_matrix[3, 3] = 1
+
+    # Apply translation to the view matrix
+    view_matrix[0, 3] = -np.dot(right, cam_pos)
+    view_matrix[1, 3] = -np.dot(up, cam_pos)
+    view_matrix[2, 3] = np.dot(forward, cam_pos)
+
+    return view_matrix
+
 class MultiVeiwNoiseRenderer(object):
     def __init__(self, width, height,z_near=0.001,z_far=1000.0):
 
@@ -140,10 +201,12 @@ class MultiVeiwNoiseRenderer(object):
         self.cube_size = 2.0
         self.resolution = 100
 
-        self.noise_threshold = 0.75
+        self.noise_threshold = 0.8
         self.noise_seed = 99
         self.noise_scale = 0.2
-        self.noise_unit_size = 0.02
+        #self.noise_unit_size = 0.02
+        self.noise_unit_size = 0.015
+        self.frag_depth_threshold = 0.016
 
         self.pts = None
         self.noise_np = None
@@ -210,7 +273,7 @@ class MultiVeiwNoiseRenderer(object):
         # bind the index buffer
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, index_buffer)
         
-    def render_noise_SS(self, depth_np, mat_view, mat_proj):
+    def render_noise_SS(self, depth_np, mat_view, mat_proj,mat_c2w=None):
         """
         Args:
             depth_np: ndarray rendered by 3dgs, true distance from the cam in world coords.
@@ -218,15 +281,14 @@ class MultiVeiwNoiseRenderer(object):
         Returns:
         """
         mat_model = np.identity(4, dtype=np.float32)
-        mat_view = mat_view.T
-        mat_proj = mat_proj.T
         mat_unproj_tex = inv_mat(mat_proj)
+        mat_view = self.c2w_to_viewmat(mat_c2w)
 
         # Load depth texture
         texture_id = depth_np2texture(depth_np,print_range=True)
         
         # Set up OpenGL context
-        gl.glDisable(gl.GL_DEPTH_TEST)
+        #gl.glDisable(gl.GL_DEPTH_TEST)
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
 
@@ -236,20 +298,23 @@ class MultiVeiwNoiseRenderer(object):
         model_loc = gl.glGetUniformLocation(self.shader_program, "model")
         view_loc = gl.glGetUniformLocation(self.shader_program, "view")
         projection_loc = gl.glGetUniformLocation(self.shader_program, "projection")
-        gl.glUniformMatrix4fv(model_loc, 1, gl.GL_FALSE, mat_model)
-        gl.glUniformMatrix4fv(view_loc, 1, gl.GL_FALSE, mat_view)
-        gl.glUniformMatrix4fv(projection_loc, 1, gl.GL_FALSE, mat_proj)
+        gl.glUniformMatrix4fv(model_loc, 1, gl.GL_TRUE, mat_model)
+        gl.glUniformMatrix4fv(view_loc, 1, gl.GL_TRUE, mat_view)
+        gl.glUniformMatrix4fv(projection_loc, 1, gl.GL_TRUE, mat_proj)
         # Set up the perspective projection matrix
 
         # Draw instanced spheres
         gl.glBindVertexArray(self.vao)
+
+        u_time_location = gl.glGetUniformLocation(shader_program, "u_depth_threshold")
+        gl.glUniform1f(u_time_location, self.frag_depth_threshold)  # Pass the uniform arg
 
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, texture_id)
         gl.glUniform1i(gl.glGetUniformLocation(self.shader_program, "depthTexture"), 0)
 
         frag_unproj_loc = gl.glGetUniformLocation(self.shader_program, "frag_unprojection")
-        gl.glUniformMatrix4fv(frag_unproj_loc, 1, gl.GL_FALSE, mat_unproj_tex)
+        gl.glUniformMatrix4fv(frag_unproj_loc, 1, gl.GL_TRUE, mat_unproj_tex)
 
         gl.glDrawElementsInstanced(gl.GL_TRIANGLES, len(self.indices), gl.GL_UNSIGNED_INT, None, len(self.pts))
         
@@ -261,8 +326,9 @@ class MultiVeiwNoiseRenderer(object):
         rendered_img = Image.frombytes("RGBA", (self.width, self.height), pixels)
         #print(f"shape: {rendered_np.shape},max:{np.max(rendered_np)},min:{np.min(rendered_np)}")
         #mask_img = Image.fromarray(rendered_np)
-        rendered_img = ImageOps.flip(rendered_img)
         rendered_np = np.array(rendered_img)
+        rendered_np=np.fliplr(rendered_np)
+        rendered_np=np.flipud(rendered_np)
         
         ### maybe need to np.flipud()
         return rendered_np
@@ -275,6 +341,43 @@ class MultiVeiwNoiseRenderer(object):
         save_img_path = os.path.join(save_path,save_img_name)
         mask_img = Image.fromarray(mask_np)
         mask_img.save(save_img_path)
+    
+    def c2w_to_viewmat(self,mat_c2w):
+        pos, up, fw = extract_camera_parameters(mat_c2w)
+        mat_view = compute_view_matrix_ogl(pos, up, fw)
+        print(f"pos:{pos},up:{up},fw:{fw}")
+        return mat_view
+
+    def binarize_mask(self, rgb_mask): # [h,w,3]
+        # Step 1: Create a boolean mask where the RGB values are not [0, 0, 0]
+        not_black_mask = np.any(mask_rgb != [0, 0, 0], axis=-1)
+        # Step 2: Convert the boolean mask to integers (0s and 1s)
+        binary_mask = not_black_mask.astype(np.uint8)
+        # Step 3: Reshape to (h, w, 1) if needed
+        binary_mask = binary_mask[:, :, np.newaxis]  # Add a new axis to make it (h, w, 1)
+        return binary_mask
+
+    def depth_np_ploter(self, depth_np,save_path):
+        depth_img = depth_np.squeeze()  # Now shape is [h, w]
+
+        # Step 2: Normalize the depth values to the range [0, 255]
+        # Assuming depth values are in the range [0, max_depth]
+        max_depth = np.max(depth_img)
+        min_depth = np.min(depth_img)
+
+        # Normalize to [0, 1]
+        normalized_depth = (depth_img - min_depth) / (max_depth - min_depth)
+
+        # Scale to [0, 255]
+        scaled_depth = (normalized_depth * 255).astype(np.uint8)
+
+        # Step 3: Convert to a PIL Image
+        grayscale_image = Image.fromarray(scaled_depth)
+
+        # Step 4: Save the grayscale image
+        grayscale_image.save(save_path)
+
+        print(f"Grayscale depth image saved as {save_path}")
 
     def make_shader_source(self):
         # Vertex shader source code
@@ -293,7 +396,8 @@ class MultiVeiwNoiseRenderer(object):
         void main()
         {
             gl_Position = projection * view * model * vec4(aPos + instancePos, 1.0);
-            fragPos = projection * view * model * vec4(aPos + instancePos, 1.0);
+            vec4 viewSpacePos = view * model * vec4(aPos + instancePos, 1.0);
+            fragPos = projection * viewSpacePos;
             colorPos = vec4(((aPos + instancePos)-vec3(-1.0,-1.0,-1.0))/2.0,1.0);
             //gl_Position = projection * view * model * vec4(aPos, 1.0);
         }
@@ -307,6 +411,7 @@ class MultiVeiwNoiseRenderer(object):
         uniform sampler2D depthTexture;
         uniform mat4 frag_unprojection;
         uniform mat4 tex_unprojection;
+        uniform float u_depth_threshold; // Float uniform
 
         // depth texture back to
         vec3 GetViewPosTex(vec2 screen_uv, mat4 unprojection)
@@ -326,7 +431,7 @@ class MultiVeiwNoiseRenderer(object):
             //float depth = fragPos.z;
             //float depth = gl_FragCoord.z;
             //float depth_threshold = 0.05 + 0.0001;
-            float depth_threshold = 0.01 + 0.0001;
+            float depth_threshold = 0.016 + 0.0001;
             
             //Normalize depth to [0, 1] range for visualization
             //float near = 0.1; 
@@ -343,12 +448,17 @@ class MultiVeiwNoiseRenderer(object):
             //vec3 view_tex_pos = GetViewPosTex(gl_FragCoord.xy, tex_unprojection);
             
             // tex depth
-            vec2 texCoords = fragPos_ndc.xy * 0.5 + 0.5; // Convert from [-1, 1] to [0, 1]
+            vec2 texCoords = fragPos_ndc.xy * 0.5 + 0.5; // Convert xy from [-1, 1] to [0, 1]
             float view_tex_depth = texture(depthTexture, texCoords).r; // true depth in view
             
-            if (abs(view_tex_depth - view_frag_depth) > depth_threshold) {
+            if ((view_tex_depth - view_frag_depth) < 0.0) {
                 discard;
             }
+            if ((view_tex_depth - view_frag_depth) > depth_threshold) {
+                discard;
+            }
+
+            // --- for simple test
             //if (view_tex_depth > view_frag_depth) {
             //    discard;
             //}

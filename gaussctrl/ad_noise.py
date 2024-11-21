@@ -50,6 +50,8 @@ def create_sphere0(radius, subdivisions=16):
     return np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32)
 
 
+
+
 def generate_uniform_points_in_cube(cube_size=2.0,resolution=50):
     """
     Args:
@@ -123,7 +125,7 @@ def load_noise_from_npy(noise_npy_path,
             return noise_np
         else:
             print(f"noise '{noise_npy_path}' not exists. generating new noise and save to '{noise_npy_path}'")
-            return gen_perlin_noise(noise_shape,scale,octaves,persistence,seed,lacunarity,seed,normalize)
+            return gen_perlin_noise(noise_shape,scale,octaves,persistence,lacunarity,seed,normalize)
     else:
         print("noise_npy_path is None or not a string.")
         return False

@@ -36,6 +36,26 @@ from gsplat.project_gaussians import project_gaussians
 from gsplat.rasterize import rasterize_gaussians
 from nerfstudio.data.scene_box import OrientedBox
 
+def projection_matrix_ogl(znear, zfar, fovx, fovy, device: Union[str, torch.device] = "cpu"):
+    """
+    -n to -1, -f to 1
+    """
+    t = znear * math.tan(0.5 * fovy)
+    b = -t
+    r = znear * math.tan(0.5 * fovx)
+    l = -r
+    n = znear
+    f = zfar
+    return torch.tensor(
+        [
+            [2 * n / (r - l), 0.0, (r + l) / (r - l), 0.0],
+            [0.0, 2 * n / (t - b), (t + b) / (t - b), 0.0],
+            [0.0, 0.0, -(f + n) / (f - n), -2.0 * f * n / (f - n)],
+            [0.0, 0.0, -1.0, 0.0],
+        ],
+        device=device,
+    )
+
 @dataclass
 class GaussCtrlModelConfig(SplatfactoModelConfig):
     """Configuration for the GaussCtrl."""
@@ -96,6 +116,17 @@ class GaussCtrlModel(SplatfactoModel):
         # shift the camera to center of scene looking at center
         R = camera.camera_to_worlds[0, :3, :3]  # 3 x 3
         T = camera.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+
+        ### ad insert begin
+        R0 = R
+        R_inv0 = R0.T
+        T_inv0 = -R_inv0 @ T
+        viewmat0 = torch.eye(4, device=R.device, dtype=R.dtype)
+        viewmat0[:3, :3] = R_inv0
+        viewmat0[:3, 3:4] = T_inv0
+        
+        ### ad insert end
+
         # flip the z and y axes to align with gsplat conventions
         R_edit = torch.diag(torch.tensor([1, -1, -1], device=self.device, dtype=R.dtype))
         R = R @ R_edit
@@ -114,6 +145,7 @@ class GaussCtrlModel(SplatfactoModel):
         W, H = int(camera.width.item()), int(camera.height.item())
         self.last_size = (H, W)
         projmat = projection_matrix(0.001, 1000, fovx, fovy, device=self.device)
+        projmat0 = projection_matrix_ogl(0.001, 1000, fovx, fovy, device=self.device)
         #print(f'projmat:{projmat}')
         BLOCK_X, BLOCK_Y = 16, 16
         tile_bounds = (
@@ -206,7 +238,7 @@ class GaussCtrlModel(SplatfactoModel):
             depth_im[alpha == 0] = 1000
 
         return {"rgb": rgb, "depth": depth_im, "accumulation": alpha,
-        "mat_view":viewmat, "mat_proj":projmat}  # type: ignore
+        "mat_view":viewmat0, "mat_proj":projmat0,"mat_c2w":camera.camera_to_worlds[0]}  # type: ignore
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:
