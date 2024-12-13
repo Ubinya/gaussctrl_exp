@@ -44,7 +44,7 @@ from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UNet2D
 from diffusers.schedulers import DDIMScheduler, DDIMInverseScheduler
 
 from gaussctrl.ad_camera import *
-from gaussctrl.ad_viewer import
+from gaussctrl.ad_viewer import *
 
 CONSOLE = Console(width=120)
 

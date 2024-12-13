@@ -199,7 +199,7 @@ class Pointnet(nn.Module):
             c_out += fea
         return c_out.permute(0, 2, 1)
 
-def inverse_frag_to_world(depth_map, proj_mat, view_mat):
+def depth_map_to_world(depth_map, proj_mat, view_mat):
     h, w, _ = depth_map.shape
     
     # Create a grid of pixel coordinates

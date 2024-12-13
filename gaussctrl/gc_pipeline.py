@@ -44,6 +44,11 @@ from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UNet2D
 from diffusers.schedulers import DDIMScheduler, DDIMInverseScheduler
 
 from gaussctrl.ad_render import MultiVeiwNoiseRenderer
+from gaussctrl.mv_model import depth_map_to_world
+from einops import rearrange
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import torch.nn.functional as F
 
 CONSOLE = Console(width=120)
 
@@ -120,6 +125,28 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.noise_renderer = MultiVeiwNoiseRenderer(width=512,height=512)
 
     def render_reverse(self):
+        depth_maps_lst = []
+        mats_view_lst = []
+        m = 8
+        for cam_idx in range(len(self.datamanager.cameras)):
+            CONSOLE.print(f"Rendering view {cam_idx}", style="bold yellow")
+            current_cam = self.datamanager.cameras[cam_idx].to(self.device)
+            if current_cam.metadata is None:
+                current_cam.metadata = {}
+            current_cam.metadata["cam_idx"] = cam_idx
+            rendered_image = self._model.get_outputs_for_camera(current_cam)
+
+            rendered_rgb = rendered_image['rgb'].to(torch.float16) # [512 512 3] 0-1
+            rendered_depth = rendered_image['depth'].to(torch.float16) # [512 512 1]
+            
+            mats_view_lst.append(rendered_image["mat_view"])
+        mats_view = torch.stack(mats_view_lst,dim=1) # [b,m,4,4]
+        
+        
+        
+        
+    
+    def render_reverse0(self):
         '''Render rgb, depth and reverse rgb images back to latents'''
         for cam_idx in range(len(self.datamanager.cameras)):
             CONSOLE.print(f"Rendering view {cam_idx}", style="bold yellow")
@@ -132,12 +159,47 @@ class GaussCtrlPipeline(VanillaPipeline):
             rendered_rgb = rendered_image['rgb'].to(torch.float16) # [512 512 3] 0-1
             rendered_depth = rendered_image['depth'].to(torch.float16) # [512 512 1]
             
-            self.noise_renderer.setup_noise("gaussctrl/noise_npy/noise1113_1944.npy")
+            #self.noise_renderer.setup_noise("gaussctrl/noise_npy/noise1113_1944.npy")
             rendered_depth32 = rendered_image['depth'].to(torch.float32).cpu().numpy() # [512 512 1]
-            mat_view = rendered_image['mat_view'].to(torch.float32).cpu().numpy()
+            #self.noise_renderer.depth_np_ploter(rendered_depth32,"gaussctrl/depth_res/depth_test.png")
+            #exit()
+            test_depth = rearrange(rendered_image['depth'], 'h w (b c) -> b c h w', c=1)
+            test_depth = F.interpolate(test_depth, size=(128, 128), mode='bilinear', align_corners=False)
+            test_depth = rearrange(test_depth, 'b c h w -> b h w c').squeeze(0)
+            depth_pts_world = depth_map_to_world(test_depth,rendered_image['mat_proj'],rendered_image["mat_view"])
+            depth_pts_world = rearrange(depth_pts_world,'b h w c -> (b h w) c').cpu().numpy()
+            # Create a 3D plot
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot the points
+            ax.scatter(depth_pts_world[:, 0], depth_pts_world[:, 1], depth_pts_world[:, 2], c='b', marker='o')
+
+            # Set labels
+            ax.set_xlabel('X Label')
+            ax.set_ylabel('Y Label')
+            ax.set_zlabel('Z Label')
+            ax.set_title('3D Point Visualization')
+
+            # Show the plot
+            plt.show()
+            exit()
+            
+            mat_view = rendered_image["mat_view"].to(torch.float32).cpu().numpy()
             mat_proj = rendered_image['mat_proj'].to(torch.float32).cpu().numpy()
-            multiviewcosis_mask = self.noise_renderer.render_noise_SS(rendered_depth32,mat_view,mat_proj)
-            self.noise_renderer.save_result_mask(multiviewcosis_mask,"gaussctrl/noise_res_img")
+            mat_c2w = rendered_image['mat_c2w'].to(torch.float32).cpu().numpy()
+            
+            #multiviewcosis_rgb_mask = self.noise_renderer.render_noise_SS(rendered_depth32, mat_view, mat_proj, mat_c2w)
+            #multiviewcosis_binary_mask = self.noise_renderer.binarize_mask(multiviewcosis_rgb_mask)
+            
+            rgb_img = rendered_image['rgb'].to(torch.float32).cpu().numpy() # [512 512 3] 0-1
+
+            rgb_img[multiviewcosis_mask[...,:-1] != 0.0] = multiviewcosis_mask[...,:-1][multiviewcosis_mask[...,:-1] != 0.0]
+
+            uint8_rgb_img = (rgb_img * 255).astype(np.uint8)
+            self.noise_renderer.save_result_mask(uint8_rgb_img,"gaussctrl/noise_res_img")
+
+            
 
             # reverse the images to noises
             self.pipe.unet.set_attn_processor(processor=AttnProcessor())
@@ -157,6 +219,9 @@ class GaussCtrlPipeline(VanillaPipeline):
                 langsam_rgb_pil = Image.fromarray((rendered_rgb.cpu().numpy() * 255).astype(np.uint8))
                 masks, _, _, _ = self.langsam.predict(langsam_rgb_pil, langsam_obj)
                 mask_npy = masks.clone().cpu().numpy()[0] * 1
+
+                # warning, size not tested
+                mask_npy = np.logical_and(multiviewcosis_binary_mask, mask_npy).astype(np.uint8)
 
             if self.config.langsam_obj != "":
                 self.update_datasets(cam_idx, rendered_rgb.cpu(), rendered_depth, latent, mask_npy)
