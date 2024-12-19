@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-from ..modules.resnet import BasicResNetBlock
-from ..modules.transformer import BasicTransformerBlock, PosEmbedding
-from .utils import get_query_value
+from gaussctrl.mv_networks.resnet import BasicResNetBlock
+from gaussctrl.mv_networks.transformer import BasicTransformerBlock, PosEmbedding
+from gaussctrl.mv_depth_utils import get_query_value
 
 
 class ImageEncodingBlock(nn.Module):
@@ -62,8 +62,6 @@ class CPAttn(nn.Module):
         img_h, img_w = reso
         outs = []
 
-        poses = cp_package['poses']
-        K = cp_package['K']
         depths = cp_package['depths']
         correspondence = cp_package['correspondence']
         overlap_mask=cp_package['overlap_mask']
@@ -85,21 +83,21 @@ class CPAttn(nn.Module):
                 xy_r = []
                 x_right = []
                 
-                xy_l = correspondence[b_i:b_i+1, i, indexs]
-                xy_r = correspondence[b_i:b_i+1, indexs, i]
+                xy_l = correspondence[b_i:b_i+1, i, indexs] #[b=1,m=1,n_ref,h,w]
+                xy_r = correspondence[b_i:b_i+1, indexs, i] #[b=1,n_ref,m=1,h,w]
                     
                 x_left = x[b_i:b_i+1, i]
                 x_right = x[b_i:b_i+1, indexs]  # bs, l, h, w, c
-                pose_l = poses[b_i:b_i+1, i]
-                pose_r = poses[b_i:b_i+1, indexs]
+                #pose_l = poses[b_i:b_i+1, i]
+                #pose_r = poses[b_i:b_i+1, indexs]
                 
-                pose_rel = torch.inverse(pose_l)[:, None]@pose_r
+                #pose_rel = torch.inverse(pose_l)[:, None]@pose_r
                 _depths=depths[b_i:b_i+1, indexs]
                 depth_query=depths[b_i:b_i+1, i]
-                _K=K[b_i:b_i+1]
+                #_K=K[b_i:b_i+1]
                 
                 query, key_value, key_value_xy, mask = get_query_value(
-                    x_left, x_right, xy_l, xy_r, depth_query, _depths, pose_rel, _K, img_h, img_w, img_h, img_w)
+                    x_left, x_right, xy_l, depth_query, _depths, img_h, img_w, img_h, img_w)
               
 
                 key_value_xy = rearrange(key_value_xy, 'b l h w c->(b h w) l c')

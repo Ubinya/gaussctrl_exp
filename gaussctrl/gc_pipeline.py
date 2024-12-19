@@ -42,13 +42,16 @@ from nerfstudio.utils import colormaps
 
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UNet2DConditionModel
 from diffusers.schedulers import DDIMScheduler, DDIMInverseScheduler
+import yaml
 
 from gaussctrl.ad_render import MultiVeiwNoiseRenderer
-from gaussctrl.mv_model import depth_map_to_world
+from gaussctrl.mv_model import depth_map_screen_to_world, get_inv_norm_depth
 from einops import rearrange
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import torch.nn.functional as F
+
+from gaussctrl.mv_generator import DepthGenerator
 
 CONSOLE = Console(width=120)
 
@@ -127,7 +130,15 @@ class GaussCtrlPipeline(VanillaPipeline):
     def render_reverse(self):
         depth_maps_lst = []
         mats_view_lst = []
-        m = 8
+        mats_proj_lst = []
+        num_frames = 4 # m
+        do_resize = True
+        if do_resize:
+            test_size = (128,128)
+        else:
+            test_size = (512,512)
+        test_prompt = "a stone bear statue in the forest"
+        ### render depths map, get view/proj mats
         for cam_idx in range(len(self.datamanager.cameras)):
             CONSOLE.print(f"Rendering view {cam_idx}", style="bold yellow")
             current_cam = self.datamanager.cameras[cam_idx].to(self.device)
@@ -140,7 +151,90 @@ class GaussCtrlPipeline(VanillaPipeline):
             rendered_depth = rendered_image['depth'].to(torch.float16) # [512 512 1]
             
             mats_view_lst.append(rendered_image["mat_view"])
-        mats_view = torch.stack(mats_view_lst,dim=1) # [b,m,4,4]
+            mats_proj_lst.append(rendered_image['mat_proj'])
+            if do_resize: # need to rerange dim order for F
+                rendered_depth = rearrange(rendered_depth, 'h w c -> c h w').unsqueeze(0)
+                rendered_depth=F.interpolate(rendered_depth, size=test_size, mode='nearest')
+                rendered_depth = rearrange(rendered_depth, 'b c h w -> b h w c').squeeze(0)
+            depth_maps_lst.append(rendered_depth)
+            if len(depth_maps_lst) == num_frames:
+                break
+        ### edit
+        ## make batch
+        depths_maps_batch_lst = []
+        mats_view_batch_lst = []
+        # during test b==1
+        mats_view = torch.stack(mats_view_lst,dim=0) # [m,4,4]
+        mats_proj = torch.stack(mats_proj_lst,dim=0) # [m,4,4]
+        depth_maps = torch.stack(depth_maps_lst,dim=0) # [m,h,w,1]
+        save_tensors = {
+            'mats_view':mats_view,
+            'mats_proj':mats_proj,
+            'depth_maps':depth_maps,
+        }
+        torch.save(save_tensors, "./gaussctrl/depth_tensors.pt")
+        print("test tensor saved.")
+        exit()
+        #
+        main_cfg_path = "./gaussctrl/depth_generation_fix_frames.yaml"
+        ckpt_path = "./gaussctrl/depth_gen.ckpt"
+        gen_config = yaml.load(open(main_cfg_path, 'rb'), Loader=yaml.SafeLoader)
+        gen_model = DepthGenerator(gen_config)
+        
+        checkpoint = torch.load(ckpt_path)
+        state_dict = checkpoint['state_dict']
+        # Rename keys in the state_dict if necessary
+        ori_keys = ['query','key','value','proj_attn']
+        key1 = [f"vae.encoder.mid_block.attentions.0.{q}.weight" for q in ori_keys]
+        key2 = [f"vae.encoder.mid_block.attentions.0.{q}.bias" for q in ori_keys]
+        key3 = [f"vae.decoder.mid_block.attentions.0.{q}.weight" for q in ori_keys]
+        key4 = [f"vae.decoder.mid_block.attentions.0.{q}.bias" for q in ori_keys]
+        key_final = key1 + key2 + key3 + key4
+        
+        model_keys = ['to_q','to_k','to_v','to_out.0',]
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key in key_final:
+                for i in range(len(ori_keys)):
+                    if ori_keys[i] in key:
+                        new_key=key.replace(ori_keys[i], model_keys[i])
+                        new_state_dict[new_key]=value
+            else:
+                new_state_dict[key] = value
+        
+        gen_model.load_state_dict(new_state_dict, strict=False)
+        gen_model.to(torch.device("cuda"))
+        gen_model.eval()
+        ## make test batch
+        batch = {}
+        
+        depth_inv_norm_full = get_inv_norm_depth(depth_maps.squeeze(-1)) # [m,h,w]
+        if do_resize:
+            d_inv_norm_size = test_size
+        else:
+            d_inv_norm_size = (512,512)
+        depth_inv_norm_small= F.interpolate(depth_inv_norm_full.unsqueeze(1), # m,1,h,w
+                                        (test_size[0]//8, test_size[1]//8), mode='nearest').squeeze(1)
+            
+
+        batch['depth_inv_norm_small'] = depth_inv_norm_small.unsqueeze(0) # [b=1,m,h,w]
+        batch['depths']=depth_maps.squeeze(-1)[None,:,:,:] # [b=1,m,h,w] to a batch
+        batch['prompt']=[test_prompt]*depth_maps.shape[0] # copy by num_frames
+        batch['mats_view']=mats_view[None,:,:,:] # [b=1,m,4,4] to a batch
+        batch['mats_proj']=mats_proj[None,:,:,:] # [b=1,m,4,4] to a batch
+        
+        img_pred = gen_model.inference_gen(batch) #[b,m,h,w,3]
+        print(f"shape of img_pred: {img_pred.shape}")
+        
+        res_save_dir = "./gaussctrl/mv_res"
+        os.makedirs(res_save_dir, exist_ok=True)
+        b,m,h,w,c=img_pred.shape
+        img_pred_np = img_pred[0].cpu().numpy()
+        for i in range(m):
+            filename = f"{res_save_dir}/{i}.png"
+            cv2.imwrite(filename, img_pred_np[i])
+            
+        exit()
         
         
         
@@ -164,9 +258,8 @@ class GaussCtrlPipeline(VanillaPipeline):
             #self.noise_renderer.depth_np_ploter(rendered_depth32,"gaussctrl/depth_res/depth_test.png")
             #exit()
             test_depth = rearrange(rendered_image['depth'], 'h w (b c) -> b c h w', c=1)
-            test_depth = F.interpolate(test_depth, size=(128, 128), mode='bilinear', align_corners=False)
             test_depth = rearrange(test_depth, 'b c h w -> b h w c').squeeze(0)
-            depth_pts_world = depth_map_to_world(test_depth,rendered_image['mat_proj'],rendered_image["mat_view"])
+            depth_pts_world = depth_map_screen_to_world(test_depth,rendered_image['mat_proj'],rendered_image["mat_view"])
             depth_pts_world = rearrange(depth_pts_world,'b h w c -> (b h w) c').cpu().numpy()
             # Create a 3D plot
             fig = plt.figure()

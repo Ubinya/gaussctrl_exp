@@ -62,31 +62,37 @@ class MVGaussctrlModel(nn.Module):
                                     list(self.condition_upblocks.parameters()), 1.0)]
 
     def get_correspondence(self, cp_package):
+        #poses = cp_package['poses']
+        #K = cp_package['K']
         
         # m: num of frames
-        poses = cp_package['poses']
-        K = cp_package['K']
-        depths = cp_package['depths']
+        mats_view=cp_package['mats_view'] # [b,m,4,4]
+        mats_proj=cp_package['mats_proj'] # [b,m,4,4]
+        depths = cp_package['depths'] # [b,m,h,w]
         b, m, h, w = depths.shape
 
         correspondence = torch.zeros(b, m, m, h, w, 2, device=depths.device)
-        K = K[:, None].repeat(1, m, 1, 1)
-        K = rearrange(K, 'b m h w -> (b m) h w')
+        #K = K[:, None].repeat(1, m, 1, 1)
+        #K = rearrange(K, 'b m h w -> (b m) h w')
         overlap_ratios=torch.zeros(b, m, m, device=depths.device)
         
+        pts_world = depth_map_screen_to_world(depths, mats_proj, mats_view) # [b,m,h,w,3]
+        depth_list_on_ref = []
+        
         for i in range(m):
-            pose_i = poses[:, i:i+1].repeat(1, m, 1, 1)
-            depth_i = depths[:, i:i+1].repeat(1, m, 1, 1)
-            pose_j = poses
-            depth_i = rearrange(depth_i, 'b m h w -> (b m) h w')
-            pose_j = rearrange(pose_j, 'b m h w -> (b m) h w')
-            pose_i = rearrange(pose_i, 'b m h w -> (b m) h w')
-            pose_rel = torch.inverse(pose_j)@pose_i
-            point_ij, _ = get_correspondence(
-                depth_i, pose_rel, K, None)  # bs, 2, hw
-            point_ij = rearrange(point_ij, '(b m) h w c -> b m h w c', b=b)
-            correspondence[:, i] = point_ij
-            mask=(point_ij[:,:,:,:,0]>=0)&(point_ij[:,:,:,:,0]<w)&(point_ij[:,:,:,:,1]>=0)&(point_ij[:,:,:,:,1]<h)
+            #depth_i = depths[:, i:i+1].repeat(1, m, 1, 1)
+            #depth_i = rearrange(depth_i, 'b m h w -> (b m) h w')
+            #mats_proj = rearrange(mats_proj, 'b m h w -> (b m) h w')
+            #mats_view = rearrange(mats_view, 'b m h w -> (b m) h w')
+            ori_pts_world = pts_world[:,i:i+1] # [b,1,h,w,3]
+            # pts_ij []
+            pts_ij, _ = pts_world_to_ref(ori_pts_world, mats_proj, mats_view)
+            #print(f"x_min:{torch.min(pts_ij[:,:,:,:,0])},x_max:{torch.max(pts_ij[:,:,:,:,0])}")
+            #print(f"y_min:{torch.min(pts_ij[:,:,:,:,1])},y_max:{torch.max(pts_ij[:,:,:,:,1])}")
+            #exit()
+            correspondence[:, i] = pts_ij # [b,m,h,w,2]
+            # ogl-like ndc range
+            mask=(pts_ij[:,:,:,:,0]>=0)&(pts_ij[:,:,:,:,0]<w)&(pts_ij[:,:,:,:,1]>=0)&(pts_ij[:,:,:,:,1]<h)
             mask=rearrange(mask, 'b m h w -> b m (h w)')
             overlap_ratios[:,i]=mask.float().mean(dim=-1)
         for b_i in range(b): # per batch
