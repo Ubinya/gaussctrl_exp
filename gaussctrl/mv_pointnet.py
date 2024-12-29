@@ -59,12 +59,12 @@ class TriPlaneAttnProcessor:
             #input_ndim_3_to_4 = True
             
         if 'pts_world' in kwargs:
-            print(f"shape of hidden_states_mv: {hidden_states_mv.shape}")
+            #print(f"shape of hidden_states_mv: {hidden_states_mv.shape}")
             hidden_states_mv_out = self.get_new_hidden_states_by_point_cloud(
                 hidden_states=hidden_states_mv,
                 pts=kwargs['pts_world']) # [b,c,h,w]
             hidden_states_mv_out = rearrange(hidden_states_mv_out,'b c h w -> b (h w) c')
-            print(f"shape of hidden_states_mv_out: {hidden_states_mv_out.shape}")
+            #print(f"shape of hidden_states_mv_out: {hidden_states_mv_out.shape}")
 
         '''
         if input_ndim_3_to_4:
@@ -155,7 +155,7 @@ class TriPlaneAttnProcessor:
         # p [b,h,w,3] c [b,c,h,w]
         b, c_dim, h, w=c.shape
         c = rearrange(c,'b c h w -> b (h w) c') # [b,t,c]
-        p = rearrange(p,'b h w c -> b (h w) c') # [b,t,3]
+        p = rearrange(p,'b c h w -> b (h w) c') # [b,t,3]
         # acquire indices of features in plane
         xy = self.normalize_coordinate(p.clone(), plane=plane, bbox_length=self.bbox_length) # normalize to the range of (0, 1)
         # xy [b,t,2]
@@ -238,25 +238,28 @@ class TriPlaneAttnProcessor:
         b, h, w, _ = pts.shape
         #print(f'shape of hidden states: {hidden_states.shape}')
         #exit()
+        pts = rearrange(pts, 'b h w c -> b c h w')
         _, _, h_l, w_l = hidden_states.shape
-        feature_pts = F.interpolate(hidden_states, size=(h, w), mode='bilinear', align_corners=False)
+        #pts = F.interpolate(pts, size=(h_l, w_l), mode='linear', align_corners=False)
+        pts = F.interpolate(pts, size=(h_l, w_l), mode='nearest')
+        #feature_pts = F.interpolate(hidden_states, size=(h, w), mode='bilinear', align_corners=False)
         #print_pointclout_centor_range(pts)
         #exit()
         
         fea = {}
         plane_feat_sum = 0
         if 'xz' in self.plane_type:
-            fea['xz'] = self.generate_plane_features(pts, feature_pts, plane='xz') # shape: batch, latent size, resolution, resolution (e.g. 16, 256, 64, 64)
+            fea['xz'] = self.generate_plane_features(pts, hidden_states, plane='xz') # shape: batch, latent size, resolution, resolution (e.g. 16, 256, 64, 64)
             plane_feat_sum += self.sample_plane_feature(pts, fea['xz'], 'xz') # [b,c,(hw)]
         if 'xy' in self.plane_type:
-            fea['xy'] = self.generate_plane_features(pts, feature_pts, plane='xy')
+            fea['xy'] = self.generate_plane_features(pts, hidden_states, plane='xy')
             plane_feat_sum += self.sample_plane_feature(pts, fea['xy'], 'xy')
         if 'yz' in self.plane_type:
-            fea['yz'] = self.generate_plane_features(pts, feature_pts, plane='yz')
+            fea['yz'] = self.generate_plane_features(pts, hidden_states, plane='yz')
             plane_feat_sum += self.sample_plane_feature(pts, fea['yz'], 'yz')
-        plane_feat_sum = rearrange(plane_feat_sum, 'b c (h w) -> b c h w', h=h)
-        new_hidden_states = F.interpolate(plane_feat_sum, size=(h_l, w_l), mode='bilinear', align_corners=False)
-        return new_hidden_states
+        plane_feat_sum = rearrange(plane_feat_sum, 'b c (h w) -> b c h w', h=h_l)
+        #new_hidden_states = F.interpolate(plane_feat_sum, size=(h_l, w_l), mode='bilinear', align_corners=False)
+        return plane_feat_sum
         
 
 

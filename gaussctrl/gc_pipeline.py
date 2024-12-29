@@ -45,13 +45,13 @@ from diffusers.schedulers import DDIMScheduler, DDIMInverseScheduler
 import yaml
 
 from gaussctrl.ad_render import MultiVeiwNoiseRenderer
-from gaussctrl.mv_model import get_inv_norm_depth
+#from gaussctrl.mv_model import get_inv_norm_depth
 from einops import rearrange
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import torch.nn.functional as F
 
-from gaussctrl.mv_generator import DepthGenerator
+#from gaussctrl.mv_generator import DepthGenerator
 from gaussctrl.mv_pointnet import TriPlaneAttnProcessor
 import cv2
 
@@ -107,7 +107,9 @@ class GaussCtrlPipeline(VanillaPipeline):
         self.ddim_inverser = DDIMInverseScheduler.from_pretrained(self.config.diffusion_ckpt, subfolder="scheduler")
         
         controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-depth")
-        self.pipe = StableDiffusionControlNetPipeline.from_pretrained(self.config.diffusion_ckpt, controlnet=controlnet).to(self.device).to(torch.float16)
+        self.pipe = StableDiffusionControlNetPipeline.from_pretrained(self.config.diffusion_ckpt,
+                                                                      controlnet=controlnet,
+                                                                      safety_checke=None).to(self.device).to(torch.float16)
         self.pipe.to(self.pipe_device)
 
         added_prompt = 'best quality, extremely detailed'
@@ -266,6 +268,14 @@ class GaussCtrlPipeline(VanillaPipeline):
                 masks, _, _, _ = self.langsam.predict(langsam_rgb_pil, langsam_obj)
                 mask_npy = masks.clone().cpu().numpy()[0] * 1
 
+            '''
+            data = {'rgb':rendered_rgb,
+                    'depth':rendered_depth,
+                    'latent':latent,
+                    'pts_world':depth_pts,
+            }
+            '''
+            
             if self.config.langsam_obj != "":
                 self.update_datasets(cam_idx, rendered_rgb.cpu(), rendered_depth, latent, mask_npy, depth_pts_world)
             else: 
@@ -386,7 +396,7 @@ class GaussCtrlPipeline(VanillaPipeline):
                                 eta=self.eta,
                                 output_type='pt',
                                 cross_attention_kwargs=cross_attention_kwargs,
-                            )
+                            ).images
             chunk_edited = chunk_edited.cpu() 
             
             
@@ -395,7 +405,8 @@ class GaussCtrlPipeline(VanillaPipeline):
             for local_idx, edited_image in enumerate(chunk_edited):
                 res_save_dir = "./gaussctrl/mv_res"
                 os.makedirs(res_save_dir, exist_ok=True)
-                img_pred_np = edited_image.cpu().numpy()
+                img_pred_np = edited_image.permute(1, 2, 0).cpu().numpy() # [3,h,w] to [h,w,3]
+                img_pred_np=(img_pred_np * 255).astype(np.uint8)
                 filename = f"{res_save_dir}/{local_idx}.png"
                 cv2.imwrite(filename, img_pred_np)
             
